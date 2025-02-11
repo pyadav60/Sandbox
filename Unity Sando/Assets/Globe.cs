@@ -3,27 +3,32 @@ using UnityEngine;
 public class Globe : MonoBehaviour
 {
     [Header("Globe Settings")]
-    public int resolution = 10; // Number of cubes along one axis of the sphere
-    public float radius = 5f; // Radius of the globe
+    public int resolution = 10;
+    public float radius = 5f;
 
     [Header("Material Settings")]
-    public Material waterMaterial; // Default water material
-    public Material landMaterial; // Land material for continents
-    public float landThreshold = 0.5f; // Perlin noise threshold for land
-    public int noiseSeed = 42; // Seed for Perlin noise
+    public Material waterMaterial;
+    public Material landMaterial;
+    public float landThreshold = 0.5f;
+    public int noiseSeed = 42;
+
+    [Header("World Settings")]
+    [Range(0f, 1f)] public float temperature = 0.5f; // 0 = cold (big ice caps), 1 = hot (small ice caps)
 
     [Header("Rotation Settings")]
-    public float rotationSpeed = 100f; // Speed of rotation when dragging
-    public Vector3 defaultSpin = new Vector3(0, 10, 0); // Default spin axis and speed
-    public float inertiaDamping = 0.95f; // Damping factor for inertia
+    public float rotationSpeed = 100f; // Drag sensitivity
+    public float inertiaDuration = 1.5f; // Time for inertia to decay
+    public float inertiaDamping = 2.5f;  // Higher = quicker slowdown
+    public Vector3 defaultSpin = new Vector3(0, 10, 0); // Passive rotation
 
-    private Vector3 currentSpin;
     private Vector3 dragSpin;
     private bool isDragging;
+    private float inertiaTimeLeft = 0f;
+    private Vector3 lastMousePosition;
+    private Vector3 spinVelocity;
 
     private void Start()
     {
-        currentSpin = defaultSpin;
         Random.InitState(noiseSeed);
         GenerateGlobe();
     }
@@ -36,15 +41,24 @@ public class Globe : MonoBehaviour
 
     private void GenerateGlobe()
     {
-        // Clear existing children
+        // Remove previous cubes
         foreach (Transform child in transform)
         {
-            Destroy(child.gameObject);
+            if (child.gameObject.GetComponent<Renderer>() != null && child.gameObject.GetComponent<Renderer>().material != null)
+            {
+                // Check if it's a cube by examining the type of its collider (optional check for efficiency)
+                if (child.gameObject.GetComponent<Collider>() is BoxCollider)
+                {
+                    Destroy(child.gameObject);
+                }
+            }
         }
 
+        // Size of each cube
         float cubeSize = (2f * radius) / resolution;
         Vector3 center = transform.position;
 
+        // Loop through the grid to place cubes
         for (int x = -resolution; x <= resolution; x++)
         {
             for (int y = -resolution; y <= resolution; y++)
@@ -52,16 +66,19 @@ public class Globe : MonoBehaviour
                 for (int z = -resolution; z <= resolution; z++)
                 {
                     Vector3 cubePosition = new Vector3(x, y, z) * cubeSize + center;
-
-                    // Check if the cube is on or inside the sphere's surface
                     float distanceToCenter = Vector3.Distance(cubePosition, center);
                     if (distanceToCenter > radius || distanceToCenter < radius - cubeSize)
                         continue;
 
-                    // Calculate Perlin noise for land placement
-                    float perlinValue = Mathf.PerlinNoise((x + resolution + noiseSeed) * 0.1f, (z + resolution + noiseSeed) * 0.1f);
+                    // Perlin Noise for land
+                    float perlinValue = Mathf.PerlinNoise(
+                        (x * 0.15f + noiseSeed * 0.1f),
+                        (z * 0.15f + y * 0.1f + noiseSeed * 0.2f)
+                    );
+
                     Material selectedMaterial = perlinValue > landThreshold ? landMaterial : waterMaterial;
 
+                    // Create the cube with the selected material
                     CreateCube(cubePosition, cubeSize, selectedMaterial);
                 }
             }
@@ -82,34 +99,69 @@ public class Globe : MonoBehaviour
         }
     }
 
-    private void HandleRotation()
-    {
-        if (Input.GetMouseButton(0)) // Left mouse button for rotation
-        {
-            isDragging = true;
-            float horizontal = Input.GetAxis("Mouse X") * rotationSpeed * Time.deltaTime;
-            float vertical = Input.GetAxis("Mouse Y") * rotationSpeed * Time.deltaTime;
+    private Vector3 smoothedSpinVelocity = Vector3.zero;
+    private float rotationLagFactor = 0.1f; // Higher value = more delay effect
 
-            dragSpin = new Vector3(-vertical, horizontal, 0);
-            transform.Rotate(dragSpin, Space.World);
-        }
-        else
-        {
-            isDragging = false;
-        }
+    private void HandleRotation()
+{
+    // Change to right-click (button 1 is the right mouse button)
+    if (Input.GetMouseButtonDown(1))
+    {
+        isDragging = true;
+        lastMousePosition = Input.mousePosition;
+        smoothedSpinVelocity = Vector3.zero; // Reset on click
     }
+
+    if (Input.GetMouseButton(1)) // Right-click drag
+    {
+        isDragging = true;
+        Vector3 mouseDelta = Input.mousePosition - lastMousePosition;
+
+        // Target velocity based on mouse movement
+        Vector3 targetSpinVelocity = new Vector3(-mouseDelta.y, mouseDelta.x, 0) * (rotationSpeed * 0.01f);
+
+        // Smoothly interpolate to target velocity
+        smoothedSpinVelocity = Vector3.Lerp(smoothedSpinVelocity, targetSpinVelocity, rotationLagFactor);
+
+        // Apply rotation with the smoothed velocity
+        transform.Rotate(smoothedSpinVelocity, Space.World);
+
+        lastMousePosition = Input.mousePosition;
+
+        // Set inertia duration when dragging
+        inertiaTimeLeft = inertiaDuration;
+    }
+    else if (isDragging) // Mouse just released
+    {
+        isDragging = false;
+        spinVelocity = smoothedSpinVelocity; // Transfer to inertia
+    }
+}
+
+
+    private Vector3 lastSpinDirection = new Vector3(1, 1, 1).normalized * Mathf.Sqrt(3); // Initial default spin
 
     private void ApplyInertia()
     {
         if (!isDragging)
         {
-            dragSpin *= inertiaDamping;
-            transform.Rotate(dragSpin * Time.deltaTime, Space.World);
-
-            if (dragSpin.magnitude < 0.01f)
+            if (inertiaTimeLeft > 0)
             {
-                dragSpin = Vector3.zero;
-                transform.Rotate(currentSpin * Time.deltaTime, Space.World);
+                float t = inertiaTimeLeft / inertiaDuration;
+                float dampingFactor = Mathf.Pow(t, inertiaDamping);
+
+                transform.Rotate(spinVelocity * dampingFactor * Time.deltaTime, Space.World);
+                inertiaTimeLeft -= Time.deltaTime;
+
+                if (inertiaTimeLeft <= 0.05f)
+                {
+                    lastSpinDirection = spinVelocity.normalized * Mathf.Sqrt(3);
+                }
+            }
+            else
+            {
+                // Resume default passive rotation
+                transform.Rotate(lastSpinDirection * Time.deltaTime, Space.World);
             }
         }
     }
